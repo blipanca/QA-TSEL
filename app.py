@@ -8,14 +8,13 @@ import os
 # Konfigurasi Halaman Utama
 st.set_page_config(page_title="Product QA & Revenue Protection 2026", layout="wide", page_icon="📊")
 st.title("📊 Enterprise Quality Intelligence & Revenue Protection")
-st.markdown("Dasbor ini menyelaraskan data kualitas produk (QA) dengan dampak finansial secara real-time.")
+st.markdown("Dasbor penyelarasan data kualitas produk (QA), dampak finansial, dan pemantauan perbaikan teknis (*Bug Tracker*).")
 
 @st.cache_data
 def load_and_sync_data():
     base_dir = os.path.dirname(os.path.abspath(__file__))
     files = os.listdir(base_dir)
     
-    # Identifikasi file sumber utama
     qa_file = next((f for f in files if "Dashboard_QA" in f and f.endswith('.xlsx')), None)
     kip_file = next((f for f in files if "KIP April" in f and f.endswith('.xlsx')), None)
     
@@ -23,15 +22,11 @@ def load_and_sync_data():
         st.error("File 'Dashboard_QA_Product_Q1_2026.xlsx' tidak ditemukan di folder kerja.")
         st.stop()
         
-    # --- 1. PROSES SHEET DISA (REVENUE & SUBS) ---
-    # Membaca mentah untuk menentukan batas data harian vs tabel summary di bawah
+    # --- 1. PROSES SHEET DISA (REVENUE) ---
     df_disa_raw = pd.read_excel(os.path.join(base_dir, qa_file), sheet_name="Disa", header=None)
-    
-    # Cari baris di mana tabel harian berakhir (biasanya ditandai kata 'Month' atau 'TOTAL')
     stop_idx = df_disa_raw[df_disa_raw[0].astype(str).str.contains("Month|TOTAL|Product", na=False)].index.min()
     if pd.isna(stop_idx): stop_idx = len(df_disa_raw)
         
-    # Ambil data harian (mulai dari baris index 2)
     df_disa = df_disa_raw.iloc[2:stop_idx].copy()
     df_disa.columns = [
         'Date', 'ChatGPT_Subs', 'ChatGPT_Rev', 'ProtekSi_Subs', 'ProtekSi_Rev', 
@@ -42,7 +37,6 @@ def load_and_sync_data():
     df_disa['Date'] = pd.to_datetime(df_disa['Date'], errors='coerce')
     df_disa = df_disa.dropna(subset=['Date'])
     
-    # Bersihkan data numerik
     for col in df_disa.columns[1:]:
         df_disa[col] = pd.to_numeric(df_disa[col], errors='coerce').fillna(0)
 
@@ -50,18 +44,51 @@ def load_and_sync_data():
     df_regional = pd.read_excel(os.path.join(base_dir, qa_file), sheet_name="Regional Analysis")
     df_top_k = pd.read_excel(os.path.join(base_dir, qa_file), sheet_name="Top K")
     
-    # --- 3. PROSES KIP APRIL (DETAIL KELUHAN) ---
+    # --- 3. PROSES BUG TRACKER (SHEET: TOP ISU) ---
+    df_top_isu_raw = pd.read_excel(os.path.join(base_dir, qa_file), sheet_name="Top Isu", header=None)
+    # Cari baris yang mengandung header tabel Bug Tracker
+    header_idx = df_top_isu_raw[df_top_isu_raw.astype(str).apply(lambda r: r.str.contains('type_3', case=False, na=False).any(), axis=1)].index.min()
+    
+    if pd.notna(header_idx):
+        df_top_isu = df_top_isu_raw.iloc[int(header_idx)+1:].copy()
+        df_top_isu.columns = df_top_isu_raw.iloc[int(header_idx)].values
+        df_top_isu = df_top_isu.dropna(subset=['type_3'])
+        
+        # Standarisasi huruf untuk mendeteksi tanda "v"
+        df_top_isu['Input Bug Tracker'] = df_top_isu['Input Bug Tracker'].astype(str).str.strip().str.lower()
+        df_top_isu['FU Product'] = df_top_isu.get('FU Product', pd.Series(dtype=str)).astype(str).str.strip().str.lower()
+        df_top_isu['Resolved'] = df_top_isu.get('Resolved', pd.Series(dtype=str)).astype(str).str.strip().str.lower()
+        
+        # Logika Penentuan Status Input
+        df_top_isu['Status Input'] = df_top_isu['Input Bug Tracker'].apply(
+            lambda x: "✅ Sudah Diinput" if x == 'v' else "❌ Belum Diinput"
+        )
+        
+        # Logika Penentuan Progress Perbaikan
+        def get_progress(row):
+            if row.get('Resolved') == 'v': 
+                return "🟢 Selesai (Resolved)"
+            elif row.get('FU Product') == 'v': 
+                return "🟡 On Progress (Follow Up)"
+            else: 
+                return "🔴 Belum Dikerjakan"
+                
+        df_top_isu['Progress Perbaikan'] = df_top_isu.apply(get_progress, axis=1)
+    else:
+        df_top_isu = pd.DataFrame()
+
+    # --- 4. PROSES KIP APRIL (VOC LOGS) ---
     df_kip = pd.DataFrame()
     if kip_file:
         df_kip = pd.read_excel(os.path.join(base_dir, kip_file), sheet_name="Apr")
         df_kip['Date'] = pd.to_datetime(df_kip['Date'], errors='coerce')
 
-    return df_disa, df_regional, df_top_k, df_kip
+    return df_disa, df_regional, df_top_k, df_top_isu, df_kip
 
 # Inisialisasi Data
-df_disa, df_regional, df_top_k, df_kip = load_and_sync_data()
+df_disa, df_regional, df_top_k, df_top_isu, df_kip = load_and_sync_data()
 
-# Penyelarasan Nama Produk Lintas Sheet
+# Penyelarasan Nama Produk
 product_map = {
     "ChatGPT Go": {"rev": "ChatGPT_Rev", "reg": "CHATGPT Go", "key": "ChatGPT"},
     "FTTR": {"rev": "FTTR_Rev", "reg": "FTTR", "key": "FTTR"},
@@ -79,7 +106,7 @@ p_info = product_map[selected_p]
 
 # --- KPI SECTION ---
 st.subheader(f"Ringkasan Performa: {selected_p}")
-total_complaints = df_regional[p_info['reg']].sum()
+total_complaints = df_regional[p_info['reg']].sum() if p_info['reg'] in df_regional.columns else 0
 total_revenue = df_disa[p_info['rev']].sum()
 avg_subs = df_disa[p_info['rev'].replace('Rev', 'Subs')].mean()
 
@@ -91,15 +118,16 @@ kpi3.metric("Rerata Subs Harian", f"{avg_subs:,.1f}")
 st.divider()
 
 # --- ANALISIS VISUAL ---
-tab_reg, tab_rev, tab_voc = st.tabs(["📍 Sebaran Regional & Isu", "📈 Recovery Tracking", "🔍 VoC Raw Logs"])
+tab_reg, tab_rev, tab_track = st.tabs(["📍 Sebaran Regional & Isu", "📈 Recovery Tracking", "📋 Bug Tracker & VoC Logs"])
 
 with tab_reg:
     c_left, c_right = st.columns(2)
     with c_left:
         st.write("**Top 10 Wilayah Terdampak**")
-        reg_plot = df_regional[['regional', p_info['reg']]].sort_values(by=p_info['reg'], ascending=False).head(10)
-        fig_bar = px.bar(reg_plot, x=p_info['reg'], y='regional', orientation='h', color=p_info['reg'], color_continuous_scale='OrRd')
-        st.plotly_chart(fig_bar, use_container_width=True)
+        if p_info['reg'] in df_regional.columns:
+            reg_plot = df_regional[['regional', p_info['reg']]].sort_values(by=p_info['reg'], ascending=False).head(10)
+            fig_bar = px.bar(reg_plot, x=p_info['reg'], y='regional', orientation='h', color=p_info['reg'], color_continuous_scale='OrRd')
+            st.plotly_chart(fig_bar, use_container_width=True)
     
     with c_right:
         st.write("**Akar Masalah Terdeteksi (Top K)**")
@@ -117,25 +145,35 @@ with tab_rev:
     fig_trend = go.Figure()
     fig_trend.add_trace(go.Scatter(x=df_disa['Date'], y=df_disa[p_info['rev']], name="Revenue", line=dict(color='#1f77b4', width=3)))
     
-    # PERBAIKAN FINAL: Konversi tanggal menjadi Milidetik (Unix Timestamp) 
-    # agar Plotly bisa menghitung posisi teks tanpa memicu error matematika.
     fix_date_ms = fix_date_ts.timestamp() * 1000
-    
-    fig_trend.add_vline(
-        x=fix_date_ms, 
-        line_dash="dash", 
-        line_color="red", 
-        annotation_text="Fix Implemented",
-        annotation_position="top right"
-    )
-    
+    fig_trend.add_vline(x=fix_date_ms, line_dash="dash", line_color="red", annotation_text="Fix Implemented", annotation_position="top right")
     fig_trend.update_layout(xaxis_title="Tanggal", yaxis_title="Revenue (Rp)", hovermode="x unified")
     st.plotly_chart(fig_trend, use_container_width=True)
-with tab_voc:
-    st.write("**Detail Keluhan Pelanggan (VoC)**")
-    if not df_kip.empty:
-        search_key = p_info.get('key', selected_p)
-        kip_filt = df_kip[df_kip['product_name'].str.contains(search_key, case=False, na=False)]
-        st.dataframe(kip_filt[['Date', 'type_3', 'notes']].sort_values(by='Date', ascending=False), use_container_width=True)
+
+with tab_track:
+    st.write("**Status Eskalasi & Tracking Perbaikan**")
+    st.markdown("Pemantauan status pelaporan *bug* teknis ke tim *Developer* dan progres penyelesaiannya.")
+    
+    search_key = p_info.get('key', selected_p)
+    
+    if not df_top_isu.empty:
+        isu_track = df_top_isu[df_top_isu['product'].astype(str).str.contains(search_key, case=False, na=False)]
+        if not isu_track.empty:
+            # Memilih kolom spesifik untuk ditampilkan di dasbor
+            display_track = isu_track[['type_3', 'Volume', 'Status Input', 'Progress Perbaikan']].rename(
+                columns={'type_3': 'Kategori Keluhan (Symptom)'}
+            )
+            st.dataframe(display_track, use_container_width=True, hide_index=True)
+        else:
+            st.info(f"✨ Belum ada laporan Bug Tracker yang tercatat untuk {selected_p}.")
     else:
-        st.warning("Data KIP April tidak ditemukan untuk analisis VoC.")
+        st.warning("Data Bug Tracker dari Sheet 'Top Isu' tidak ditemukan.")
+
+    st.divider()
+    
+    st.write("**Detail Keluhan Pelanggan (VoC Mentah)**")
+    if not df_kip.empty:
+        kip_filt = df_kip[df_kip['product_name'].str.contains(search_key, case=False, na=False)]
+        st.dataframe(kip_filt[['Date', 'type_3', 'notes']].sort_values(by='Date', ascending=False), use_container_width=True, hide_index=True)
+    else:
+        st.info("Data raw logs belum dimuat. (Bisa ditambahkan jika file KIP April disertakan).")
